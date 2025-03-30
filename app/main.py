@@ -1,7 +1,8 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, BackgroundTasks
 from pydantic import BaseModel
 from enum import Enum
 from typing import Optional, List
+import asyncio
 
 from app.patlite_controller import patlite, PatliteColor, PatlitePattern, LED
 
@@ -10,6 +11,10 @@ app = FastAPI(
     description="hidapiを使用してパトライトデバイスを制御するAPI",
     version="1.0.0"
 )
+
+# 非同期処理のためのセマフォ
+# これによりパトライト操作は一度に1つのリクエストのみが実行されるようになる
+patlite_semaphore = asyncio.Semaphore(1)
 
 
 class StatusResponse(BaseModel):
@@ -48,237 +53,263 @@ class SimpleBuzzerRequest(BaseModel):
     mode: int = 3   # デフォルトは3回動作
 
 
+# パトライト操作用の同期関数（バックグラウンドタスクとして実行）
+def sync_patlite_operation(operation_func, *args, **kwargs):
+    """
+    パトライトを操作する同期関数をバックグラウンドタスクとして実行
+    
+    Args:
+        operation_func: 実行する関数
+        args, kwargs: 関数に渡す引数
+    
+    Returns:
+        操作の結果
+    """
+    return operation_func(*args, **kwargs)
+
+
 @app.on_event("startup")
 async def startup():
     """アプリ起動時にデバイスに接続を試みる"""
-    if not patlite.connected:
-        patlite.connect()
+    async with patlite_semaphore:
+        if not patlite.connected:
+            patlite.connect()
 
 
 @app.on_event("shutdown")
 async def shutdown():
     """アプリ終了時にデバイスから切断する"""
-    if patlite.connected:
-        patlite.disconnect()
+    async with patlite_semaphore:
+        if patlite.connected:
+            patlite.disconnect()
 
 
 @app.get("/status", response_model=StatusResponse)
 async def get_status():
     """接続状態を取得"""
-    return StatusResponse(
-        success=patlite.connected,
-        message="デバイスに接続されています" if patlite.connected else "デバイスに接続されていません"
-    )
+    async with patlite_semaphore:
+        return StatusResponse(
+            success=patlite.connected,
+            message="デバイスに接続されています" if patlite.connected else "デバイスに接続されていません"
+        )
 
 
 @app.post("/connect", response_model=StatusResponse)
 async def connect_device():
     """デバイスに接続"""
-    if patlite.connected:
-        return StatusResponse(success=True, message="すでに接続されています")
-    
-    success = patlite.connect()
-    if success:
-        return StatusResponse(success=True, message="接続に成功しました")
-    else:
-        raise HTTPException(status_code=500, detail="デバイスへの接続に失敗しました")
+    async with patlite_semaphore:
+        if patlite.connected:
+            return StatusResponse(success=True, message="すでに接続されています")
+        
+        success = patlite.connect()
+        if success:
+            return StatusResponse(success=True, message="接続に成功しました")
+        else:
+            raise HTTPException(status_code=500, detail="デバイスへの接続に失敗しました")
 
 
 @app.post("/disconnect", response_model=StatusResponse)
 async def disconnect_device():
     """デバイスから切断"""
-    if not patlite.connected:
-        return StatusResponse(success=True, message="既に切断されています")
-    
-    patlite.disconnect()
-    return StatusResponse(success=True, message="切断しました")
+    async with patlite_semaphore:
+        if not patlite.connected:
+            return StatusResponse(success=True, message="既に切断されています")
+        
+        patlite.disconnect()
+        return StatusResponse(success=True, message="切断しました")
 
 
 @app.post("/light", response_model=StatusResponse)
-async def set_light(request: LightRequest):
+async def set_light(request: LightRequest, background_tasks: BackgroundTasks):
     """ライトの設定"""
-    if not patlite.connected:
-        raise HTTPException(status_code=400, detail="デバイスに接続されていません")
-    
-    try:
-        color = PatliteColor(request.color)
-        pattern = PatlitePattern(request.pattern)
-    except ValueError:
-        raise HTTPException(status_code=400, detail="無効な色またはパターンが指定されました")
-    
-    success = patlite.set_light(color, pattern)
-    if success:
+    async with patlite_semaphore:
+        if not patlite.connected:
+            raise HTTPException(status_code=400, detail="デバイスに接続されていません")
+        
+        try:
+            color = PatliteColor(request.color)
+            pattern = PatlitePattern(request.pattern)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="無効な色またはパターンが指定されました")
+        
+        # バックグラウンドタスクでパトライト操作を実行
+        background_tasks.add_task(sync_patlite_operation, patlite.set_light, color, pattern)
+        
         return StatusResponse(success=True, message="ライトを設定しました")
-    else:
-        raise HTTPException(status_code=500, detail="ライトの設定に失敗しました")
 
 
 @app.post("/leds", response_model=StatusResponse)
-async def set_leds(request: LEDRequest):
+async def set_leds(request: LEDRequest, background_tasks: BackgroundTasks):
     """複数のLEDを同時に設定"""
-    if not patlite.connected:
-        raise HTTPException(status_code=400, detail="デバイスに接続されていません")
-    
-    try:
-        led_flags = LED.NONE
-        for led_name in request.leds:
-            if led_name.upper() == "RED":
-                led_flags |= LED.RED
-            elif led_name.upper() == "YELLOW":
-                led_flags |= LED.YELLOW
-            elif led_name.upper() == "GREEN":
-                led_flags |= LED.GREEN
-            elif led_name.upper() == "BLUE":
-                led_flags |= LED.BLUE
-            elif led_name.upper() == "WHITE":
-                led_flags |= LED.WHITE
-            else:
-                raise ValueError(f"無効なLED名: {led_name}")
+    async with patlite_semaphore:
+        if not patlite.connected:
+            raise HTTPException(status_code=400, detail="デバイスに接続されていません")
         
-        success = patlite.set_leds(led_flags)
-        if success:
+        try:
+            led_flags = LED.NONE
+            for led_name in request.leds:
+                if led_name.upper() == "RED":
+                    led_flags |= LED.RED
+                elif led_name.upper() == "YELLOW":
+                    led_flags |= LED.YELLOW
+                elif led_name.upper() == "GREEN":
+                    led_flags |= LED.GREEN
+                elif led_name.upper() == "BLUE":
+                    led_flags |= LED.BLUE
+                elif led_name.upper() == "WHITE":
+                    led_flags |= LED.WHITE
+                else:
+                    raise ValueError(f"無効なLED名: {led_name}")
+            
+            # バックグラウンドタスクでパトライト操作を実行
+            background_tasks.add_task(sync_patlite_operation, patlite.set_leds, led_flags)
+            
             return StatusResponse(success=True, message="LEDを設定しました")
-        else:
-            raise HTTPException(status_code=500, detail="LEDの設定に失敗しました")
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
 
 
 @app.post("/buzzer", response_model=StatusResponse)
-async def set_buzzer(request: BuzzerRequest):
+async def set_buzzer(request: BuzzerRequest, background_tasks: BackgroundTasks):
     """ブザーの設定"""
-    if not patlite.connected:
-        raise HTTPException(status_code=400, detail="デバイスに接続されていません")
-    
-    success = patlite.set_buzzer(request.sound, request.mode)
-    if success:
+    async with patlite_semaphore:
+        if not patlite.connected:
+            raise HTTPException(status_code=400, detail="デバイスに接続されていません")
+        
+        # バックグラウンドタスクでパトライト操作を実行
+        background_tasks.add_task(sync_patlite_operation, patlite.set_buzzer, request.sound, request.mode)
+        
         return StatusResponse(success=True, message="ブザーを設定しました")
-    else:
-        raise HTTPException(status_code=500, detail="ブザーの設定に失敗しました")
 
 
 @app.post("/buzzer/stop", response_model=StatusResponse)
-async def stop_buzzer():
+async def stop_buzzer(background_tasks: BackgroundTasks):
     """ブザーの停止"""
-    if not patlite.connected:
-        raise HTTPException(status_code=400, detail="デバイスに接続されていません")
-    
-    success = patlite.stop_buzzer()
-    if success:
+    async with patlite_semaphore:
+        if not patlite.connected:
+            raise HTTPException(status_code=400, detail="デバイスに接続されていません")
+        
+        # バックグラウンドタスクでパトライト操作を実行
+        background_tasks.add_task(sync_patlite_operation, patlite.stop_buzzer)
+        
         return StatusResponse(success=True, message="ブザーを停止しました")
-    else:
-        raise HTTPException(status_code=500, detail="ブザーの停止に失敗しました")
 
 
 @app.post("/all", response_model=StatusResponse)
-async def set_all(request: AllSettingsRequest):
+async def set_all(request: AllSettingsRequest, background_tasks: BackgroundTasks):
     """全ての設定を一度に行う"""
-    if not patlite.connected:
-        raise HTTPException(status_code=400, detail="デバイスに接続されていません")
-    
-    try:
-        led_flags = LED.NONE
-        for led_name in request.leds:
-            if led_name.upper() == "RED":
-                led_flags |= LED.RED
-            elif led_name.upper() == "YELLOW":
-                led_flags |= LED.YELLOW
-            elif led_name.upper() == "GREEN":
-                led_flags |= LED.GREEN
-            elif led_name.upper() == "BLUE":
-                led_flags |= LED.BLUE
-            elif led_name.upper() == "WHITE":
-                led_flags |= LED.WHITE
-            else:
-                raise ValueError(f"無効なLED名: {led_name}")
+    async with patlite_semaphore:
+        if not patlite.connected:
+            raise HTTPException(status_code=400, detail="デバイスに接続されていません")
         
-        success = patlite.set_all(led_flags, request.buzzer_sound, request.buzzer_mode)
-        if success:
+        try:
+            led_flags = LED.NONE
+            for led_name in request.leds:
+                if led_name.upper() == "RED":
+                    led_flags |= LED.RED
+                elif led_name.upper() == "YELLOW":
+                    led_flags |= LED.YELLOW
+                elif led_name.upper() == "GREEN":
+                    led_flags |= LED.GREEN
+                elif led_name.upper() == "BLUE":
+                    led_flags |= LED.BLUE
+                elif led_name.upper() == "WHITE":
+                    led_flags |= LED.WHITE
+                else:
+                    raise ValueError(f"無効なLED名: {led_name}")
+            
+            # バックグラウンドタスクでパトライト操作を実行
+            background_tasks.add_task(
+                sync_patlite_operation, 
+                patlite.set_all, 
+                led_flags, 
+                request.buzzer_sound, 
+                request.buzzer_mode
+            )
+            
             return StatusResponse(success=True, message="すべての設定を適用しました")
-        else:
-            raise HTTPException(status_code=500, detail="設定の適用に失敗しました")
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
 
 
 @app.post("/reset", response_model=StatusResponse)
-async def reset_lights():
+async def reset_lights(background_tasks: BackgroundTasks):
     """全てのライトをオフにする"""
-    if not patlite.connected:
-        raise HTTPException(status_code=400, detail="デバイスに接続されていません")
-    
-    success = patlite.reset()
-    if success:
+    async with patlite_semaphore:
+        if not patlite.connected:
+            raise HTTPException(status_code=400, detail="デバイスに接続されていません")
+        
+        # バックグラウンドタスクでパトライト操作を実行
+        background_tasks.add_task(sync_patlite_operation, patlite.reset)
+        
         return StatusResponse(success=True, message="ライトをリセットしました")
-    else:
-        raise HTTPException(status_code=500, detail="ライトのリセットに失敗しました")
 
 
 # 簡易操作用APIエンドポイント
 
 @app.post("/turn_on_red", response_model=StatusResponse)
-async def turn_on_red():
+async def turn_on_red(background_tasks: BackgroundTasks):
     """赤色LEDを点灯させる"""
-    if not patlite.connected:
-        raise HTTPException(status_code=400, detail="デバイスに接続されていません")
-    
-    success = patlite.set_leds(LED.RED)
-    if success:
+    async with patlite_semaphore:
+        if not patlite.connected:
+            raise HTTPException(status_code=400, detail="デバイスに接続されていません")
+        
+        # バックグラウンドタスクでパトライト操作を実行
+        background_tasks.add_task(sync_patlite_operation, patlite.set_leds, LED.RED)
+        
         return StatusResponse(success=True, message="赤色LEDを点灯しました")
-    else:
-        raise HTTPException(status_code=500, detail="赤色LEDの点灯に失敗しました")
 
 
 @app.post("/turn_on_yellow", response_model=StatusResponse)
-async def turn_on_yellow():
+async def turn_on_yellow(background_tasks: BackgroundTasks):
     """黄色LEDを点灯させる"""
-    if not patlite.connected:
-        raise HTTPException(status_code=400, detail="デバイスに接続されていません")
-    
-    success = patlite.set_leds(LED.YELLOW)
-    if success:
+    async with patlite_semaphore:
+        if not patlite.connected:
+            raise HTTPException(status_code=400, detail="デバイスに接続されていません")
+        
+        # バックグラウンドタスクでパトライト操作を実行
+        background_tasks.add_task(sync_patlite_operation, patlite.set_leds, LED.YELLOW)
+        
         return StatusResponse(success=True, message="黄色LEDを点灯しました")
-    else:
-        raise HTTPException(status_code=500, detail="黄色LEDの点灯に失敗しました")
 
 
 @app.post("/turn_on_green", response_model=StatusResponse)
-async def turn_on_green():
+async def turn_on_green(background_tasks: BackgroundTasks):
     """緑色LEDを点灯させる"""
-    if not patlite.connected:
-        raise HTTPException(status_code=400, detail="デバイスに接続されていません")
-    
-    success = patlite.set_leds(LED.GREEN)
-    if success:
+    async with patlite_semaphore:
+        if not patlite.connected:
+            raise HTTPException(status_code=400, detail="デバイスに接続されていません")
+        
+        # バックグラウンドタスクでパトライト操作を実行
+        background_tasks.add_task(sync_patlite_operation, patlite.set_leds, LED.GREEN)
+        
         return StatusResponse(success=True, message="緑色LEDを点灯しました")
-    else:
-        raise HTTPException(status_code=500, detail="緑色LEDの点灯に失敗しました")
 
 
 @app.post("/turn_off_LED", response_model=StatusResponse)
-async def turn_off_LED():
+async def turn_off_LED(background_tasks: BackgroundTasks):
     """すべてのLEDを消灯させる"""
-    if not patlite.connected:
-        raise HTTPException(status_code=400, detail="デバイスに接続されていません")
-    
-    success = patlite.set_leds(LED.NONE)
-    if success:
+    async with patlite_semaphore:
+        if not patlite.connected:
+            raise HTTPException(status_code=400, detail="デバイスに接続されていません")
+        
+        # バックグラウンドタスクでパトライト操作を実行
+        background_tasks.add_task(sync_patlite_operation, patlite.set_leds, LED.NONE)
+        
         return StatusResponse(success=True, message="すべてのLEDを消灯しました")
-    else:
-        raise HTTPException(status_code=500, detail="LEDの消灯に失敗しました")
 
 
 @app.post("/play_buzzer", response_model=StatusResponse)
-async def play_buzzer(request: SimpleBuzzerRequest = None):
+async def play_buzzer(background_tasks: BackgroundTasks, request: SimpleBuzzerRequest = None):
     """ブザーを鳴らす（デフォルトはD7音で3回鳴動）"""
-    if not patlite.connected:
-        raise HTTPException(status_code=400, detail="デバイスに接続されていません")
-    
-    if request is None:
-        request = SimpleBuzzerRequest()
-    
-    success = patlite.set_buzzer(request.sound, request.mode)
-    if success:
-        return StatusResponse(success=True, message="ブザーを鳴らしました")
-    else:
-        raise HTTPException(status_code=500, detail="ブザー動作に失敗しました") 
+    async with patlite_semaphore:
+        if not patlite.connected:
+            raise HTTPException(status_code=400, detail="デバイスに接続されていません")
+        
+        if request is None:
+            request = SimpleBuzzerRequest()
+        
+        # バックグラウンドタスクでパトライト操作を実行
+        background_tasks.add_task(sync_patlite_operation, patlite.set_buzzer, request.sound, request.mode)
+        
+        return StatusResponse(success=True, message="ブザーを鳴らしました") 

@@ -1,6 +1,7 @@
 import hid
 from enum import Enum, Flag, auto
 from typing import Dict, Optional, List
+import threading
 
 
 class PatliteColor(Enum):
@@ -89,6 +90,9 @@ class PatliteController:
         self.device = None
         self.connected = False
         
+        # パトライト操作用のロック
+        self.lock = threading.Lock()
+        
         # 現在のLED状態を保持する変数
         self.current_led_r_y = 0x00
         self.current_led_g_b = 0x00
@@ -96,20 +100,22 @@ class PatliteController:
         
     def connect(self) -> bool:
         """パトライトデバイスに接続する"""
-        try:
-            self.device = hid.device()
-            self.device.open(self.VENDOR_ID, self.PRODUCT_ID)
-            self.connected = True
-            return True
-        except Exception as e:
-            print(f"接続エラー: {e}")
-            return False
+        with self.lock:
+            try:
+                self.device = hid.device()
+                self.device.open(self.VENDOR_ID, self.PRODUCT_ID)
+                self.connected = True
+                return True
+            except Exception as e:
+                print(f"接続エラー: {e}")
+                return False
     
     def disconnect(self) -> None:
         """パトライトデバイスから切断する"""
-        if self.connected and self.device:
-            self.device.close()
-            self.connected = False
+        with self.lock:
+            if self.connected and self.device:
+                self.device.close()
+                self.connected = False
     
     def set_light(self, color: PatliteColor, pattern: PatlitePattern) -> bool:
         """
@@ -122,56 +128,57 @@ class PatliteController:
         Returns:
             操作が成功したかどうか
         """
-        if not self.connected:
-            print("デバイスに接続されていません")
-            return False
-            
-        try:
-            # 色に基づいてLEDの制御値を設定
-            led_r_y = 0x00  # 赤・黄LEDの制御値
-            led_g_b = 0x00  # 緑・青LEDの制御値
-            led_white = 0x00  # 白LEDの制御値
-            
-            if color == PatliteColor.RED:
-                led_r_y = self._LED_RED
-            elif color == PatliteColor.YELLOW:
-                led_r_y = self._LED_YELLOW
-            elif color == PatliteColor.GREEN:
-                led_g_b = self._LED_GREEN
-            elif color == PatliteColor.BLUE:
-                led_g_b = self._LED_BLUE
-            elif color == PatliteColor.PURPLE:
-                led_r_y = self._LED_RED
-                led_g_b = self._LED_BLUE
-            elif color == PatliteColor.CYAN:
-                led_g_b = self._LED_GREEN | self._LED_BLUE
-            elif color == PatliteColor.WHITE:
-                led_white = self._LED_WHITE
-            
-            # パターン（現在は点灯のみ対応）
-            # 点滅や点灯フラッシュは今後実装予定
-            
-            # 現在の状態を保存
-            self.current_led_r_y = led_r_y
-            self.current_led_g_b = led_g_b
-            self.current_led_white = led_white
-            
-            # コマンドデータを構築
-            data = [0] * 9
-            data[1] = 0x00            # コマンドバージョン（固定）
-            data[2] = 0x00            # コマンドID（固定）
-            data[3] = 0x00            # ブザー制御（変更なし）
-            data[4] = 0x00            # ブザー音階（変更なし）
-            data[5] = led_r_y         # LED制御 (赤・黄)
-            data[6] = led_g_b         # LED制御 (緑・青)
-            data[7] = led_white       # LED C(白)
-            data[8] = 0x00            # 予備（固定）
-            
-            self.device.write(data)
-            return True
-        except Exception as e:
-            print(f"ライト設定エラー: {e}")
-            return False
+        with self.lock:
+            if not self.connected:
+                print("デバイスに接続されていません")
+                return False
+                
+            try:
+                # 色に基づいてLEDの制御値を設定
+                led_r_y = 0x00  # 赤・黄LEDの制御値
+                led_g_b = 0x00  # 緑・青LEDの制御値
+                led_white = 0x00  # 白LEDの制御値
+                
+                if color == PatliteColor.RED:
+                    led_r_y = self._LED_RED
+                elif color == PatliteColor.YELLOW:
+                    led_r_y = self._LED_YELLOW
+                elif color == PatliteColor.GREEN:
+                    led_g_b = self._LED_GREEN
+                elif color == PatliteColor.BLUE:
+                    led_g_b = self._LED_BLUE
+                elif color == PatliteColor.PURPLE:
+                    led_r_y = self._LED_RED
+                    led_g_b = self._LED_BLUE
+                elif color == PatliteColor.CYAN:
+                    led_g_b = self._LED_GREEN | self._LED_BLUE
+                elif color == PatliteColor.WHITE:
+                    led_white = self._LED_WHITE
+                
+                # パターン（現在は点灯のみ対応）
+                # 点滅や点灯フラッシュは今後実装予定
+                
+                # 現在の状態を保存
+                self.current_led_r_y = led_r_y
+                self.current_led_g_b = led_g_b
+                self.current_led_white = led_white
+                
+                # コマンドデータを構築
+                data = [0] * 9
+                data[1] = 0x00            # コマンドバージョン（固定）
+                data[2] = 0x00            # コマンドID（固定）
+                data[3] = 0x00            # ブザー制御（変更なし）
+                data[4] = 0x00            # ブザー音階（変更なし）
+                data[5] = led_r_y         # LED制御 (赤・黄)
+                data[6] = led_g_b         # LED制御 (緑・青)
+                data[7] = led_white       # LED C(白)
+                data[8] = 0x00            # 予備（固定）
+                
+                self.device.write(data)
+                return True
+            except Exception as e:
+                print(f"ライト設定エラー: {e}")
+                return False
             
     def set_leds(self, leds: LED) -> bool:
         """
@@ -183,76 +190,78 @@ class PatliteController:
         Returns:
             操作が成功したかどうか
         """
-        if not self.connected:
-            print("デバイスに接続されていません")
-            return False
-            
-        try:
-            led_r_y = 0x00
-            led_g_b = 0x00
-            led_white = 0x00
-            
-            if LED.RED in leds:
-                led_r_y |= self._LED_RED
-            
-            if LED.YELLOW in leds:
-                led_r_y |= self._LED_YELLOW
+        with self.lock:
+            if not self.connected:
+                print("デバイスに接続されていません")
+                return False
                 
-            if LED.GREEN in leds:
-                led_g_b |= self._LED_GREEN
+            try:
+                led_r_y = 0x00
+                led_g_b = 0x00
+                led_white = 0x00
                 
-            if LED.BLUE in leds:
-                led_g_b |= self._LED_BLUE
+                if LED.RED in leds:
+                    led_r_y |= self._LED_RED
                 
-            if LED.WHITE in leds:
-                led_white |= self._LED_WHITE
+                if LED.YELLOW in leds:
+                    led_r_y |= self._LED_YELLOW
+                    
+                if LED.GREEN in leds:
+                    led_g_b |= self._LED_GREEN
+                    
+                if LED.BLUE in leds:
+                    led_g_b |= self._LED_BLUE
+                    
+                if LED.WHITE in leds:
+                    led_white |= self._LED_WHITE
+                    
+                # 現在の状態を保存
+                self.current_led_r_y = led_r_y
+                self.current_led_g_b = led_g_b
+                self.current_led_white = led_white
                 
-            # 現在の状態を保存
-            self.current_led_r_y = led_r_y
-            self.current_led_g_b = led_g_b
-            self.current_led_white = led_white
-            
-            # コマンドデータを構築
-            data = [0] * 9
-            data[1] = 0x00            # コマンドバージョン（固定）
-            data[2] = 0x00            # コマンドID（固定）
-            data[3] = 0x00            # ブザー制御（変更なし）
-            data[4] = 0x00            # ブザー音階（変更なし）
-            data[5] = led_r_y         # LED制御 (赤・黄)
-            data[6] = led_g_b         # LED制御 (緑・青)
-            data[7] = led_white       # LED C(白)
-            data[8] = 0x00            # 予備（固定）
-            
-            self.device.write(data)
-            return True
-        except Exception as e:
-            print(f"LED設定エラー: {e}")
-            return False
+                # コマンドデータを構築
+                data = [0] * 9
+                data[1] = 0x00            # コマンドバージョン（固定）
+                data[2] = 0x00            # コマンドID（固定）
+                data[3] = 0x00            # ブザー制御（変更なし）
+                data[4] = 0x00            # ブザー音階（変更なし）
+                data[5] = led_r_y         # LED制御 (赤・黄)
+                data[6] = led_g_b         # LED制御 (緑・青)
+                data[7] = led_white       # LED C(白)
+                data[8] = 0x00            # 予備（固定）
+                
+                self.device.write(data)
+                return True
+            except Exception as e:
+                print(f"LED設定エラー: {e}")
+                return False
     
     def reset(self) -> bool:
         """全てのライトをオフにする"""
-        try:
-            # すべてのLEDをオフにするコマンド
-            data = [0] * 9
-            data[1] = 0x00            # コマンドバージョン（固定）
-            data[2] = 0x00            # コマンドID（固定）
-            data[3] = 0x00            # ブザー制御（オフ）
-            data[4] = 0x00            # ブザー音階（オフ）
-            data[5] = 0x00            # LED制御 (赤・黄) オフ
-            data[6] = 0x00            # LED制御 (緑・青) オフ
-            data[7] = 0x00            # LED C(白) 固定
-            data[8] = 0x00            # 予備（固定）
-            
-            # 現在の状態をクリア
-            self.current_led_r_y = 0x00
-            self.current_led_g_b = 0x00
-            self.current_led_white = 0x00
-            
-            self.device.write(data)
-            return True
-        except Exception as e:
-            print(f"リセットエラー: {e}")
-            return False
+        with self.lock:
+            try:
+                # すべてのLEDをオフにするコマンド
+                data = [0] * 9
+                data[1] = 0x00            # コマンドバージョン（固定）
+                data[2] = 0x00            # コマンドID（固定）
+                data[3] = 0x00            # ブザー制御（オフ）
+                data[4] = 0x00            # ブザー音階（オフ）
+                data[5] = 0x00            # LED制御 (赤・黄) オフ
+                data[6] = 0x00            # LED制御 (緑・青) オフ
+                data[7] = 0x00            # LED C(白) 固定
+                data[8] = 0x00            # 予備（固定）
+                
+                # 現在の状態をクリア
+                self.current_led_r_y = 0x00
+                self.current_led_g_b = 0x00
+                self.current_led_white = 0x00
+                
+                self.device.write(data)
+                return True
+            except Exception as e:
+                print(f"リセットエラー: {e}")
+                return False
             
     def set_buzzer(self, sound: int, mode: int) -> bool:
         """
@@ -265,27 +274,28 @@ class PatliteController:
         Returns:
             操作が成功したかどうか
         """
-        if not self.connected:
-            print("デバイスに接続されていません")
-            return False
-            
-        try:
-            # コマンドデータを構築
-            data = [0] * 9
-            data[1] = 0x00            # コマンドバージョン（固定）
-            data[2] = 0x00            # コマンドID（固定）
-            data[3] = mode            # ブザー制御
-            data[4] = sound           # ブザー音階
-            data[5] = self.current_led_r_y  # 現在のLED状態を維持
-            data[6] = self.current_led_g_b  # 現在のLED状態を維持
-            data[7] = self.current_led_white  # 現在のLED状態を維持
-            data[8] = 0x00            # 予備（固定）
-            
-            self.device.write(data)
-            return True
-        except Exception as e:
-            print(f"ブザー設定エラー: {e}")
-            return False
+        with self.lock:
+            if not self.connected:
+                print("デバイスに接続されていません")
+                return False
+                
+            try:
+                # コマンドデータを構築
+                data = [0] * 9
+                data[1] = 0x00            # コマンドバージョン（固定）
+                data[2] = 0x00            # コマンドID（固定）
+                data[3] = mode            # ブザー制御
+                data[4] = sound           # ブザー音階
+                data[5] = self.current_led_r_y  # 現在のLED状態を維持
+                data[6] = self.current_led_g_b  # 現在のLED状態を維持
+                data[7] = self.current_led_white  # 現在のLED状態を維持
+                data[8] = 0x00            # 予備（固定）
+                
+                self.device.write(data)
+                return True
+            except Exception as e:
+                print(f"ブザー設定エラー: {e}")
+                return False
             
     def stop_buzzer(self) -> bool:
         """
@@ -308,51 +318,52 @@ class PatliteController:
         Returns:
             操作が成功したかどうか
         """
-        if not self.connected:
-            print("デバイスに接続されていません")
-            return False
-            
-        try:
-            led_r_y = 0x00
-            led_g_b = 0x00
-            led_white = 0x00
-            
-            if LED.RED in leds:
-                led_r_y |= self._LED_RED
-            
-            if LED.YELLOW in leds:
-                led_r_y |= self._LED_YELLOW
+        with self.lock:
+            if not self.connected:
+                print("デバイスに接続されていません")
+                return False
                 
-            if LED.GREEN in leds:
-                led_g_b |= self._LED_GREEN
+            try:
+                led_r_y = 0x00
+                led_g_b = 0x00
+                led_white = 0x00
                 
-            if LED.BLUE in leds:
-                led_g_b |= self._LED_BLUE
+                if LED.RED in leds:
+                    led_r_y |= self._LED_RED
                 
-            if LED.WHITE in leds:
-                led_white |= self._LED_WHITE
+                if LED.YELLOW in leds:
+                    led_r_y |= self._LED_YELLOW
+                    
+                if LED.GREEN in leds:
+                    led_g_b |= self._LED_GREEN
+                    
+                if LED.BLUE in leds:
+                    led_g_b |= self._LED_BLUE
+                    
+                if LED.WHITE in leds:
+                    led_white |= self._LED_WHITE
+                    
+                # 現在の状態を保存
+                self.current_led_r_y = led_r_y
+                self.current_led_g_b = led_g_b
+                self.current_led_white = led_white
                 
-            # 現在の状態を保存
-            self.current_led_r_y = led_r_y
-            self.current_led_g_b = led_g_b
-            self.current_led_white = led_white
-            
-            # コマンドデータを構築
-            data = [0] * 9
-            data[1] = 0x00            # コマンドバージョン（固定）
-            data[2] = 0x00            # コマンドID（固定）
-            data[3] = buzzer_mode     # ブザー制御
-            data[4] = buzzer_sound    # ブザー音階
-            data[5] = led_r_y         # LED制御 (赤・黄)
-            data[6] = led_g_b         # LED制御 (緑・青)
-            data[7] = led_white       # LED C(白)
-            data[8] = 0x00            # 予備（固定）
-            
-            self.device.write(data)
-            return True
-        except Exception as e:
-            print(f"設定エラー: {e}")
-            return False
+                # コマンドデータを構築
+                data = [0] * 9
+                data[1] = 0x00            # コマンドバージョン（固定）
+                data[2] = 0x00            # コマンドID（固定）
+                data[3] = buzzer_mode     # ブザー制御
+                data[4] = buzzer_sound    # ブザー音階
+                data[5] = led_r_y         # LED制御 (赤・黄)
+                data[6] = led_g_b         # LED制御 (緑・青)
+                data[7] = led_white       # LED C(白)
+                data[8] = 0x00            # 予備（固定）
+                
+                self.device.write(data)
+                return True
+            except Exception as e:
+                print(f"設定エラー: {e}")
+                return False
 
 
 # シングルトンインスタンス

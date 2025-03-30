@@ -10,19 +10,29 @@ HIDAPIを使用してパトライトデバイスを制御するためのRESTful 
 
 ## インストール
 
+### Mac環境向け
+
 1. リポジトリをクローン:
    ```
-   git clone https://github.com/yourusername/patlite.git
-   cd patlite
+   git clone https://github.com/system8bit/patlite_server.git
+   cd patlite_server
    ```
 
-2. 依存関係をインストール:
+2. Pythonの仮想環境を作成:
+   ```
+   alias python=python3
+   python -m venv venv
+   source venv/bin/activate
+   ```
+
+3. 依存関係をインストール:
    ```
    pip install -r requirements.txt
    ```
 
-3. パトライトデバイスのVendor IDとProduct IDを設定:
+4. パトライトデバイスのVendor IDとProduct IDを設定:
    `app/patlite_controller.py` ファイルを開き、`VENDOR_ID`と`PRODUCT_ID`を実際のデバイスの値に変更します。
+   (デフォルトでは VendorID: 0x191a, ProductID: 0x8003 に設定されています)
 
 ## 使用方法
 
